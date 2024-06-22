@@ -1,0 +1,15 @@
+[package]
+name = "sample-web"
+version = "0.1.1"
+authors = ["bland <NothingsBland@proton.me>"]
+edition = "2021"
+
+[[bin]]
+name = "sample-web"
+path = "src/main.rs"
+
+[dependencies]
+blandwork = { path = "../../" }
+axum = { version = "0.7.5" }
+maud = { version = "*", features = ["axum"]}
+tokio = { version = "1.25", features = ["full"] }
