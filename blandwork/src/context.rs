@@ -3,12 +3,11 @@ use std::{
     fmt::Display, future::Future, pin::Pin, 
     sync::Arc, task::{Context as TaskContext, Poll}
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
-use axum::extract::Request;
+use axum::{extract::Request, http::HeaderValue};
 use axum_htmx::{HX_BOOSTED, HX_REQUEST, HX_TRIGGER};
 use hyper::{HeaderMap, Response};
-use maud::Markup;
 use serde::{ser::SerializeMap, Serialize};
 use serde_json::to_string;
 use tower::{Layer, Service};
@@ -25,11 +24,6 @@ where
     fn serialize(&self) -> String {
         to_string(self).unwrap()
     }
-}
-
-/// Trait for rendering maud components with context
-pub trait Component {
-    fn render(&self, context: &Context) -> Markup;
 }
 
 pub struct Event {
@@ -51,7 +45,6 @@ impl Serialize for Event {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer {
-            
             // Flatten the `data` field if it exists
             if let Some(ref data) = self.data {
                 let mut map = serializer.serialize_map(None)?;
@@ -99,8 +92,6 @@ impl Serialize for Triggers {
     where
         S: serde::Serializer {
         let groups: HashMap<String, Vec<&Event>> = self.group_triggers();
-
-        // let mut seq = serializer.serialize_seq(Some(groups.len()))?;
         let mut map = serializer.serialize_map(None)?;
 
         for (key, g) in &groups {
@@ -123,7 +114,7 @@ impl Display for Triggers {
     }
 }
 
-pub struct Context{
+pub struct Ctx {
     pub context_id: String,
     pub path: String,
 
@@ -131,21 +122,44 @@ pub struct Context{
     headers: HeaderMap,
 
     // response triggers
-    triggers: Triggers
+    triggers: Triggers,
+
+    // features are accessed from layout!
+    // features: Vec<Box<dyn Feature>>
 }
 
-impl Context {
+impl Ctx {
     pub fn build(request: &Request) -> Self  {
         let headers: HeaderMap = request.headers().clone();
         let path: String = request.uri().path().to_owned();
 
-        Context{
+        Ctx {
             context_id: Uuid::new_v4().to_string(),
             path,
             headers,
-            triggers: Triggers::new()
+            triggers: Triggers::new(),
         }
     }
+}
+
+#[derive(Clone)]
+pub struct ContextAccessor(Arc<Mutex<Ctx>>);
+
+impl ContextAccessor { 
+    pub async fn context(&self) -> Context {
+        let ctx = self.0.lock().await;
+        Context(ctx)
+    }
+
+    pub fn from_request(request: &Request) -> Self {
+        let ctx: Ctx = Ctx::build(&request);
+        return ContextAccessor(Arc::new(Mutex::new(ctx)));
+    }
+}
+
+pub struct Context<'a>(MutexGuard<'a, Ctx>);
+
+impl<'a> Context<'a> {
 
     pub fn title(&self) -> String {
         // match self.navigator.current_link() {
@@ -159,20 +173,28 @@ impl Context {
         "".to_owned()
     }
 
+    pub fn id(&self) -> String {
+        return self.0.context_id.clone();
+    }
+    
     pub fn is_htmx(&self) -> bool {
-        return self.headers.contains_key(HX_REQUEST);
+        return self.0.headers.contains_key(HX_REQUEST);
     }
 
     pub fn is_boosted(&self) -> bool {
-        return self.headers.contains_key(HX_BOOSTED);
+        return self.0.headers.contains_key(HX_BOOSTED);
     }
 
     pub fn add_trigger<E: Serializable + 'static>(&mut self, key: String, data: E) {
-        self.triggers.add(Event::new(key, data));
+        self.0.triggers.add(Event::new(key, data));
     }
 
     pub fn empty_trigger(&mut self, key: String) {
-        self.triggers.add(Event::empty(key));
+        self.0.triggers.add(Event::empty(key));
+    }
+
+    pub fn triggers(&self) -> HeaderValue {
+        self.0.triggers.to_string().parse().unwrap()
     }
 }
 
@@ -214,28 +236,28 @@ where
     }
 
     fn call(&mut self, mut req: Request) -> Self::Future {
+        tracing::info!("context layer start");
+
         // build context
-        let context: Arc<Mutex<Context>> = Arc::new(Mutex::new(self.new_context(&req)));
+        let accessor: ContextAccessor = ContextAccessor::from_request(&req);
 
         // send the context into the handler
         let extensions = req.extensions_mut();
-        extensions.insert( Arc::clone(&context));
-
-        tracing::info!("context layer start");
+        extensions.insert( accessor.clone());
 
         let inner = self.inner.call(req);
 
         Box::pin(async move {
             let mut response: Response<axum::body::Body> = inner.await?;
 
-            let ctx = context.lock().await;
+            let context: Context = accessor.context().await;
 
-            tracing::info!("context layer wrap {:#?}", ctx.is_boosted());
+            tracing::info!("context layer wrap {:#?}", context.is_boosted());
             
-            if ctx.is_boosted() {
+            if context.is_boosted() {
                 // HX-Trigger https://htmx.org/headers/hx-trigger/
                 let mut headers: HeaderMap = HeaderMap::new();
-                headers.insert(HX_TRIGGER, ctx.triggers.to_string().parse().unwrap());
+                headers.insert(HX_TRIGGER, context.triggers());
                 response.headers_mut().extend(headers);
             }
             tracing::info!("context layer end");
@@ -244,13 +266,6 @@ where
     }
 
 }
-
-impl<S> ContextService<S> {
-    fn new_context(&self, request: &Request) -> Context {
-        Context::build(request)
-    }
-}
-
 
 #[cfg(test)]
 mod test {

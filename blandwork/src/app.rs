@@ -14,11 +14,10 @@ use tower_http::{
     trace::TraceLayer};
 
 use crate::{
-    context::ContextLayer, 
+    context::ContextLayer,
+    template::{TemplateLayer, Template},
     db::ConnectionPool, 
-    feature::Feature, 
-    layout::{Layout, LayoutLayer}, 
-    Config,
+    feature::Feature, Config
 };
 
 #[derive(Clone)]
@@ -27,17 +26,17 @@ pub struct NoPool;
 #[derive(Clone)]
 pub struct NoFeatures;
 
-pub type Features = Vec<Box<(dyn Feature + 'static)>>;
+pub type Features = Vec<Box<dyn Feature>>;
 
-pub struct App<P, F, L> where L: Layout {
+pub struct App<P, F, T> where T: Template {
     // application configuration
     config: Config,
 
     // application router
     router: Router,
 
-    // application layout
-    layout: L,
+    // application template
+    template: T,
 
     // features should be decoupled from navigator/template/theme.
     // they can reference the current theme in their handlers.
@@ -45,14 +44,14 @@ pub struct App<P, F, L> where L: Layout {
 
     // optional and only matters for Extension() on router
     // Features could use it in their handlers, but we can't know that during build.
-    pool: P,
+    pub pool: P,
 }
 
-impl<L> App<NoPool, NoFeatures, L> where L: Layout {
-    pub fn new(config: Config, layout: L) -> App<NoPool, NoFeatures, L> {
+impl<T> App<NoPool, NoFeatures, T> where T: Template {
+    pub fn new(config: Config, template: T) -> App<NoPool, NoFeatures, T> {
         App{
             config,
-            layout,
+            template,
             router: Router::new(),
             pool: NoPool,
             features: NoFeatures,
@@ -60,8 +59,8 @@ impl<L> App<NoPool, NoFeatures, L> where L: Layout {
     }
 }
 
-impl<L> App<NoPool, NoFeatures, L> where L: Layout + 'static {
-    pub async fn connect(&mut self) -> App<ConnectionPool, NoFeatures, L> { 
+impl<T> App<NoPool, NoFeatures, T> where T: Template + 'static {
+    pub async fn connect(&mut self) -> App<ConnectionPool, NoFeatures, T> { 
         let tokio_config = tokio_postgres::config::Config::from_str(
             &self.config.database.connection_string()
         )
@@ -82,26 +81,26 @@ impl<L> App<NoPool, NoFeatures, L> where L: Layout + 'static {
             router: self.router.clone(),
             pool,
             features: NoFeatures,
-            layout: self.layout.clone()
+            template: self.template.clone()
         };
     }
 
-    pub fn register_feature_default<F: Feature + Default + 'static>(&self) ->  App<NoPool, Features, L>{         
-        let features: Vec<Box<dyn Feature + 'static>> = vec![
+    pub fn register_feature_default<F: Feature + Default + 'static>(&self) ->  App<NoPool, Features, T>{         
+        let features: Vec<Box<dyn Feature>> = vec![
             Box::new(F::default())
         ];
 
         return App { 
             config: self.config.clone(),
             router: self.router.clone(),
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             pool: NoPool,
             features,
         };
     }
 
-    pub fn register_feature(&self, feature: impl Feature + 'static) ->  App<NoPool, Features, L>{         
-        let features: Vec<Box<dyn Feature + 'static>> = vec![
+    pub fn register_feature(&self, feature: impl Feature + 'static) ->  App<NoPool, Features, T>{         
+        let features: Vec<Box<dyn Feature>> = vec![
             Box::new(feature)
         ];
 
@@ -109,14 +108,14 @@ impl<L> App<NoPool, NoFeatures, L> where L: Layout + 'static {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: NoPool,
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             features,
         };
     }
 }
 
-impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
-    pub fn register_feature_default<F: Feature + Default + 'static>(&mut self) ->  App<NoPool, Features, L>{
+impl<T> App<NoPool, Features, T> where T: Template + 'static  {
+    pub fn register_feature_default<F: Feature + Default + 'static>(&mut self) ->  App<NoPool, Features, T>{
         self.features.push(Box::new(F::default()));
 
         // relocate features into new App
@@ -126,12 +125,12 @@ impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: NoPool,
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             features,
         };
     }
 
-    pub fn register_feature(&mut self, feature: impl Feature + 'static) ->  App<NoPool, Features, L>{         
+    pub fn register_feature(&mut self, feature: impl Feature + 'static) ->  App<NoPool, Features, T>{         
         self.features.push(Box::new(feature));
 
         // relocate features into new App
@@ -141,12 +140,12 @@ impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: NoPool,
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             features,
         };
     }
 
-    pub fn apply_fallback(&mut self) -> App<NoPool, Features, L> {
+    pub fn apply_fallback(&mut self) -> App<NoPool, Features, T> {
         let mut router: Router = mem::replace(&mut self.router, Router::new());
         let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
 
@@ -159,13 +158,13 @@ impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
         return App { 
             config: self.config.clone(),
             pool: NoPool,
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             router,
             features
         };
     }
 
-    pub fn apply_extension<S: Clone + Send + Sync + 'static>(&mut self, state: S) -> App<NoPool, Features, L> {
+    pub fn apply_extension<S: Clone + Send + Sync + 'static>(&mut self, state: S) -> App<NoPool, Features, T> {
         let mut router: Router = mem::replace(&mut self.router, Router::new());
         let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
         
@@ -174,13 +173,13 @@ impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
         return App {
             config: self.config.clone(),
             pool: NoPool,
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             router,
             features,
         };
     }
 
-    pub fn layout<F: Layout + 'static>(&mut self, layout: L) -> App<NoPool, Features, L> {
+    pub fn template<F: Template + 'static>(&mut self, template: T) -> App<NoPool, Features, T> {
         let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
         
         App { 
@@ -188,25 +187,33 @@ impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
             router: self.router.clone(), 
             pool: NoPool,
             features,
-            layout,
+            template,
         }
     }
 
-    pub fn build(&mut self) -> App<NoPool, Features, L>{
+    pub fn build(&mut self) -> App<NoPool, Features, T>{
         let mut router: Router = mem::replace(&mut self.router, Router::new());
         let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
     
         // 1. scan features and extract links for navigator
-        for feature in features.iter() {
-            self.layout.register(feature)
-        };
+        for feature in features.into_iter() {
+            self.template.register(&feature);
 
-        // 2. scan features and apply routers
-        for feature in features.iter() {
             router = match feature.api() {
-                Some(api) => {
-                    // what about feature specific middleware?
+                Some(mut api) => {
+                    api = api.layer(ContextLayer::new());
+
                     router.merge(api)
+                }, 
+                None => router
+            };
+
+            router = match feature.supplemental() {
+                Some(mut supp) => {
+                    supp = supp
+                        .layer(ContextLayer::new());
+                    
+                    router.merge(supp)
                 }, 
                 None => router
             };
@@ -214,7 +221,7 @@ impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
             router = match feature.web() {
                 Some(mut web) => {
                     web = web
-                        .layer(LayoutLayer::new(self.layout.clone()))
+                        .layer(TemplateLayer::new(self.template.clone()))
                         .layer(ContextLayer::new());
                     
                     router.merge(web)
@@ -226,7 +233,7 @@ impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
         router = router
 
             // web assets (css, javascript, etc)
-            .nest_service("/web", ServeDir::new("web"))
+            .nest_service("/web", ServeDir::new(self.config.server.asset_path.clone()))
             
             // core layers
             .layer(
@@ -260,7 +267,7 @@ impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
         return App {
             config: self.config.clone(),
             pool: self.pool.clone(),
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             features: Vec::new(),
             router,
         };
@@ -282,8 +289,8 @@ impl<L> App<NoPool, Features, L> where L: Layout + 'static  {
     }
 }
 
-impl<L> App<ConnectionPool, NoFeatures, L>  where L: Layout + 'static  {
-    pub fn register_feature_default<F: Feature + Default + 'static>(&self) ->  App<ConnectionPool, Features, L>{         
+impl<T> App<ConnectionPool, NoFeatures, T>  where T: Template + 'static  {
+    pub fn register_feature_default<F: Feature + Default + 'static>(&self) ->  App<ConnectionPool, Features, T>{         
         let features: Vec<Box<dyn Feature + 'static>> = vec![
             Box::new(F::default())
         ];
@@ -292,12 +299,12 @@ impl<L> App<ConnectionPool, NoFeatures, L>  where L: Layout + 'static  {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: self.pool.clone(),
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             features,
         };
     }
 
-    pub fn register_feature(&self, feature: impl Feature + 'static) ->  App<ConnectionPool, Features, L>{         
+    pub fn register_feature(&self, feature: impl Feature + 'static) ->  App<ConnectionPool, Features, T>{         
         let features: Vec<Box<dyn Feature + 'static>> = vec![
             Box::new(feature)
         ];
@@ -306,25 +313,25 @@ impl<L> App<ConnectionPool, NoFeatures, L>  where L: Layout + 'static  {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: self.pool.clone(),
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             features,
         };
     }
 
-    pub fn layout<F: Layout + 'static>(&mut self, layout: L) -> App<NoPool, NoFeatures, L> {
+    pub fn template<F: Template + 'static>(&mut self, template: T) -> App<NoPool, NoFeatures, T> {
         App { 
             config: self.config.clone(), 
             router: self.router.clone(), 
             pool: NoPool,
             features: NoFeatures,
-            layout,
+            template,
         }
     }
 
 }
 
-impl<L> App<ConnectionPool, Features, L> where L: Layout + 'static  {
-    pub fn register_feature_default<F: Feature + Default + 'static>(&mut self) ->  App<ConnectionPool, Features, L>{
+impl<T> App<ConnectionPool, Features, T> where T: Template + 'static  {
+    pub fn register_feature_default<F: Feature + Default + 'static>(&mut self) ->  App<ConnectionPool, Features, T>{
         self.features.push(Box::new(F::default()));
 
         // relocate features into new App
@@ -334,12 +341,12 @@ impl<L> App<ConnectionPool, Features, L> where L: Layout + 'static  {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: self.pool.clone(),
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             features,
         };
     }
 
-    pub fn register_feature(&mut self, feature: impl Feature + 'static) ->  App<ConnectionPool, Features, L>{         
+    pub fn register_feature(&mut self, feature: impl Feature + 'static) ->  App<ConnectionPool, Features, T>{         
         self.features.push(Box::new(feature));
 
         // relocate features into new App
@@ -349,12 +356,12 @@ impl<L> App<ConnectionPool, Features, L> where L: Layout + 'static  {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: self.pool.clone(),
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             features,
         };
     }
 
-    pub fn apply_fallback(&mut self) -> App<ConnectionPool, Features, L> {
+    pub fn apply_fallback(&mut self) -> App<ConnectionPool, Features, T> {
         let mut router: Router = mem::replace(&mut self.router, Router::new());
         let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
 
@@ -367,13 +374,13 @@ impl<L> App<ConnectionPool, Features, L> where L: Layout + 'static  {
         return App { 
             config: self.config.clone(),
             pool: self.pool.clone(),
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             router,
             features
         };
     }
 
-    pub fn apply_extension<S: Clone + Send + Sync + 'static>(&mut self, state: S) -> App<ConnectionPool, Features, L> {
+    pub fn apply_extension<S: Clone + Send + Sync + 'static>(&mut self, state: S) -> App<ConnectionPool, Features, T> {
         let mut router: Router = mem::replace(&mut self.router, Router::new());
         let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
         
@@ -382,13 +389,13 @@ impl<L> App<ConnectionPool, Features, L> where L: Layout + 'static  {
         return App {
             config: self.config.clone(),
             pool: self.pool.clone(),
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             router,
             features,
         };
     }
 
-    pub fn layout<F: Layout + 'static>(&mut self, layout: L) -> App<ConnectionPool, Features, L> {
+    pub fn template<F: Template + 'static>(&mut self, template: T) -> App<ConnectionPool, Features, T> {
         let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
         
         App { 
@@ -396,25 +403,36 @@ impl<L> App<ConnectionPool, Features, L> where L: Layout + 'static  {
             router: self.router.clone(), 
             pool: self.pool.clone(),
             features,
-            layout,
+            template,
         }
     }
 
-    pub fn build(&mut self) -> App<ConnectionPool, Features, L>{
+    pub fn build(&mut self) -> App<ConnectionPool, Features, T>{
         let mut router: Router = mem::replace(&mut self.router, Router::new());
         let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
     
         // 1. scan features and extract links for navigator
-        for feature in features.iter() {
-            self.layout.register(feature)
-        };
+        // for feature in features.iter() {
+        //     self.layout.register(feature)
+        // };
 
         // 2. scan features and apply routers
         for feature in features.iter() {
             router = match feature.api() {
-                Some(api) => {
-                    // what about feature specific middleware?
+                Some(mut api) => {
+                    api = api.layer(ContextLayer::new());
+
                     router.merge(api)
+                }, 
+                None => router
+            };
+
+            router = match feature.supplemental() {
+                Some(mut supp) => {
+                    supp = supp
+                        .layer(ContextLayer::new());
+                    
+                    router.merge(supp)
                 }, 
                 None => router
             };
@@ -422,7 +440,7 @@ impl<L> App<ConnectionPool, Features, L> where L: Layout + 'static  {
             router = match feature.web() {
                 Some(mut web) => {
                     web = web
-                        .layer(LayoutLayer::new(self.layout.clone()))
+                        .layer(TemplateLayer::new(self.template.clone()))
                         .layer(ContextLayer::new());
                        
                     router.merge(web)
@@ -434,7 +452,7 @@ impl<L> App<ConnectionPool, Features, L> where L: Layout + 'static  {
         router = router
 
             // web assets (css, javascript, etc)
-            .nest_service("/web", ServeDir::new("../web"))
+            .nest_service("/web", ServeDir::new(self.config.server.asset_path.clone()))
             
             // core layers
             .layer(
@@ -474,7 +492,7 @@ impl<L> App<ConnectionPool, Features, L> where L: Layout + 'static  {
         return App {
             config: self.config.clone(),
             pool: self.pool.clone(),
-            layout: self.layout.clone(),
+            template: self.template.clone(),
             features,
             router,
         };

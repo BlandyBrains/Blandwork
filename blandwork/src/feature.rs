@@ -2,7 +2,7 @@ use axum::Router;
 use maud::{html, Markup};
 use serde::Serialize;
 
-use crate::{Component, Context};
+use crate::{ConnectionPool, Context};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Link {
@@ -13,8 +13,8 @@ pub struct Link {
     pub icon: Option<String>,
     pub css: Option<String>
 }
-impl Component for Link {
-    fn render(&self, _: &Context) -> Markup {
+impl Link {
+    pub fn render(&self, _: &Context) -> Markup {
         let active_class: String = match self.active {
             true => "bg-gray-400".to_owned(),
             false => "bg-gray-600".to_owned()
@@ -31,22 +31,45 @@ impl Component for Link {
     }
 }
 
-
+/// Features are not Clone + Send + Sync due to our application builder.
+/// They are meant to be for definition and configuration purposes
+/// and are not accessible during requests.
 pub trait Feature {
-    fn name(&self) -> String;
-
+    
+    /// Navigation hook to the entrypoint into the feature
     fn link(&self) -> Option<Link> {
-        return None;
+        None
     }
 
+    /// API endpoints exposed from the feature
     fn api(&self) -> Option<Router> {
         return None;
     }
 
+    /// Supplemental endpoints are routes that should only be accessed from the web endpoints.
+    /// These routes are wrapped in the Context middleware and are not HTMX aware.
+    /// use cases:
+    /// - Search Results
+    fn supplemental(&self) -> Option<Router> {
+        return None;
+    }
+
+    /// Web endpoints are routes that can be accessed directly or boosted after entering the application.
+    /// These routes are wrapped in the Context and Template middleware, the template will ALWAYS be applied 
+    /// if the incoming request is not HX-Boosted.
     fn web(&self) -> Option<Router> {
         return None;
     }
 }
 
-
 pub type FeatureError = Box<dyn std::error::Error>;
+
+pub trait Component {
+    fn render(&self, context: &Context) -> Markup {
+        html!{
+            b { 
+                "Component has not been implemented!"
+            }
+        }
+    }
+}

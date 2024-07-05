@@ -1,15 +1,12 @@
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use template::VanillaTemplate;
 
-use blandwork::{App, Config, Context, Link, Feature, Router, IntoResponse, HeaderMap, StatusCode};
-use layout::VanillaLayout;
+use blandwork::{App, Config, Context, ContextAccessor, Feature, HeaderMap, IntoResponse, Link, Router, StatusCode};
 use maud::{html, Markup};
 use axum::routing::get;
 use axum::Extension;
 use serde::Serialize;
 
 mod template;
-mod layout;
 mod navigator;
 
 
@@ -19,7 +16,7 @@ pub struct SampleEvent{
     pub data: String
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SampleFeature;
 
 impl SampleFeature {
@@ -88,13 +85,15 @@ impl SampleFeature {
         body
     }
 
-    async fn more(Extension(context): Extension<Arc<Mutex<Context>>>) -> Markup {
+    async fn more(Extension(accessor): Extension<ContextAccessor>) -> Markup {
         // using context from handler
-        let mut ctx = context.lock().await;
+        let mut context = accessor.context().await;
 
-        tracing::info!("from handler context={} , is_boosted {}", ctx.context_id, ctx.is_boosted());
+        tracing::info!("from handler context={} , is_boosted {}", context.id(), context.is_boosted());
 
-        ctx.add_trigger("MY_FEATURE_TRIGGER".to_owned(), SampleEvent{ data: "THIS WOULD BE SOME DATA".to_string() });
+        context.add_trigger(
+            "MY_FEATURE_TRIGGER".to_owned(), 
+            SampleEvent { data: "THIS WOULD BE SOME DATA".to_string() });
 
         return html!{
             b { "More content" }
@@ -111,9 +110,17 @@ impl SampleFeature {
     }
 }
 
+
 impl Feature for SampleFeature {
-    fn name(&self) -> String {
-        return "SampleFeature".to_owned();
+    fn link(&self) -> Option<Link> {
+        Some(Link {
+            title: "A".to_string(),
+            label: "A".to_string(),
+            active: false,
+            route: "/sample/web".to_string(),
+            icon: None,
+            css: None
+        })
     }
 
     fn web(&self) -> Option<Router> {
@@ -130,22 +137,11 @@ impl Feature for SampleFeature {
             // .layer(FrameworkLayer::new(navigator.clone(), VanillaHtmxTemplate{}))
         )
     }
-
-    fn link(&self) -> Option<Link> {
-        Some(Link {
-            title: "A".to_string(),
-            label: "A".to_string(),
-            active: false,
-            route: "/sample/web".to_string(),
-            icon: None,
-            css: None
-        })
-    }
 }
 
 #[tokio::main]
 async fn main() {
-    App::new(Config::default(), VanillaLayout::default())
+    App::new(Config::default(), VanillaTemplate::default())
         .register_feature_default::<SampleFeature>()
         .apply_fallback()
         .build()

@@ -1,4 +1,4 @@
-use blandwork::{Context, Template, Component};
+use blandwork::{Context, Template};
 use maud::{html, Markup, DOCTYPE};
 
 use crate::navigator::Navigator;

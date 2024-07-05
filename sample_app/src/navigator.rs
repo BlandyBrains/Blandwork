@@ -1,6 +1,5 @@
 use std::cmp::Reverse;
-
-use blandwork::{Component, Link};
+use blandwork::Link;
 use maud::{html, Markup};
 
 use crate::Context;
@@ -46,8 +45,8 @@ impl Navigator {
 
 }
 
-impl Component for Navigator {
-    fn render(&self, context: &Context) -> Markup {
+impl Navigator {
+    pub fn render(&self, context: &Context) -> Markup {
         html!{
             @for link in &self.links {
                 (link.render(context))
