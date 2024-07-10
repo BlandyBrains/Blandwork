@@ -41,6 +41,10 @@ pub trait Feature {
         None
     }
 
+    fn menu(&self) -> Option<Markup> {
+        None
+    }
+
     /// API endpoints exposed from the feature
     fn api(&self) -> Option<Router> {
         return None;

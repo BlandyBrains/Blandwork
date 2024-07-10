@@ -31,15 +31,13 @@ impl Database {
 pub struct Server {
     pub host: String,
     pub port: i32,
-    pub asset_path: String
 }
 
 impl Default for Server {
     fn default() -> Self {
         Self { 
             host: "0.0.0.0".to_owned(), 
-            port: 3001,
-            asset_path: String::default()
+            port: 3001
         }
     }
 }

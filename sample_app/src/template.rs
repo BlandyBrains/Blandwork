@@ -47,21 +47,22 @@ impl Template for VanillaTemplate {
                 (self.head(context))
 
                 // <body>
-                body {
-                    
+                body hx-boost="true" {
+                    b {
+                        "WOULD BE HEADER"
+                    }
                     div #root class="h-lvh bg-pink-500 lg:bg-green-500 md:bg-red-500 p-4" {
 
-                        div #navigator
-                            class="flex flex-col items-center justify-start p-2"
-                            hx-boost="true"
-                            hx-target="#content"
-                            hx-swap="innerHTML" {
-                            (self.navigator.render(context))
-                        }
+                        // div #navigator
+                        //     class="flex flex-col items-center justify-start p-2"
+                        //     hx-boost="true"
+                        //     hx-target="#content"
+                        //     hx-swap="innerHTML" {
+                        //     (self.navigator.render(context))
+                        // }
 
-                        div #content 
-                            class="flex flex-col justify-start w-full" 
-                            hx-boost="true" {
+                        div 
+                            class="flex flex-col justify-start w-full" {
 
                             header 
                                 class="flex flex-col items-center" {
@@ -100,7 +101,9 @@ impl Template for VanillaTemplate {
                                     }
                                 }
                             }
-                            section class="flex flex-col items-center" {
+                            
+                            section 
+                                class="flex flex-col items-center" {
                                 button {
                                     "standard button"
                                 }
@@ -114,7 +117,9 @@ impl Template for VanillaTemplate {
                                 }
                             }
 
-                            (body)
+                            div #content {
+                                (body)
+                            }
                         }
                     }
                 }

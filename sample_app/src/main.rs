@@ -24,39 +24,39 @@ impl SampleFeature {
         let body = html!{
             div 
                 class="flex flex-col justify-start items-center w-full" {
-                div {
-                    b { "Hi! From Sample Feature." }
-                }
-                br;
-                div #new-content {
-                    b { "I will be replaced" }
-                }
-                br;
+                // div {
+                //     b { "Hi! From Sample Feature." }
+                // }
+                // br;
+                // div #new-content {
+                //     b { "I will be replaced" }
+                // }
+                // br;
                 a href="/sample/more" 
                     // hx-target="#new-content" 
                     hx-target="#content"
-                    hx-swap="innerHTML"
+                    // hx-swap="innerHTML"
                     {
                     strong {"Click here"} " to replace all content"
                 }
-                br;
+                // br;
 
-                // Don't do this! 
-                div hx-boost="true" {
-                    button
-                        hx-boost="true"
-                        hx-get="/sample/web" 
-                        // this works
-                        // hx-headers="{\"HX-Boosted\":\"true\"}"
+                // // Don't do this! 
+                // div hx-boost="true" {
+                //     button
+                //         hx-boost="true"
+                //         hx-get="/sample/web" 
+                //         // this works
+                //         // hx-headers="{\"HX-Boosted\":\"true\"}"
 
-                        // hx-target="#new-content" 
-                        // hx-select="#other"
-                        hx-target="#content"
-                        // hx-swap="innerHTML"
-                        hx-push-url="true" {    
-                        strong {"Click here"} " to replace select content"
-                    }
-                }
+                //         // hx-target="#new-content" 
+                //         // hx-select="#other"
+                //         hx-target="#content"
+                //         // hx-swap="innerHTML"
+                //         hx-push-url="true" {    
+                //         strong {"Click here"} " to replace select content"
+                //     }
+                // }
             }
         };
 

@@ -233,7 +233,7 @@ impl<T> App<NoPool, Features, T> where T: Template + 'static  {
         router = router
 
             // web assets (css, javascript, etc)
-            .nest_service("/web", ServeDir::new(self.config.server.asset_path.clone()))
+            // .nest_service("/web", ServeDir::new(self.config.server.asset_path.clone()))
             
             // core layers
             .layer(
@@ -452,7 +452,7 @@ impl<T> App<ConnectionPool, Features, T> where T: Template + 'static  {
         router = router
 
             // web assets (css, javascript, etc)
-            .nest_service("/web", ServeDir::new(self.config.server.asset_path.clone()))
+            // .nest_service("/web", ServeDir::new(self.config.server.asset_path.clone()))
             
             // core layers
             .layer(
