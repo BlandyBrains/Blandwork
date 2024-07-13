@@ -6,7 +6,9 @@ use std::{
 
 use serde::Deserialize;
 
-#[derive(Deserialize, Clone, Debug, Default)]
+use crate::features::ContentPath;
+
+#[derive(Deserialize, Clone, Default)]
 pub struct Database {
     pub host: String,
     pub database: String,
@@ -27,23 +29,35 @@ impl Database {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone)]
 pub struct Server {
+    pub environment: String,
     pub host: String,
     pub port: i32,
+    pub template_path: String,
+    pub shell_template: String,
+    pub content_paths: Vec<ContentPath>
 }
 
 impl Default for Server {
     fn default() -> Self {
         Self { 
+            environment: "development".to_owned(),
+            template_path: "templates".to_owned(),
+            shell_template: "shell.html".to_owned(),
             host: "0.0.0.0".to_owned(), 
-            port: 3001
+            port: 3001,
+            content_paths: vec![
+                ContentPath::new("web", "./web/dist"),
+                ContentPath::new("images", "./web/images")
+            ]
         }
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone)]
 pub struct Config {
+    pub title: String,
     pub database: Database,
     pub server: Server
 }
@@ -51,6 +65,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self { 
+            title: "Blandwork".to_owned(),
             database: Default::default(),
             server: Default::default() 
         }
@@ -92,13 +107,13 @@ mod test {
             port = 1234
         "#).unwrap();
 
-        println!("{:#?}", config);
+        // println!("{:#?}", config);
     }
 
     #[test]
     fn test_config_from_file() {
         let config: Config = Config::from_path("../../configs/dev.toml").unwrap();
-        println!("{:#?}", config);
+        // println!("{:#?}", config);
     }
 
 }

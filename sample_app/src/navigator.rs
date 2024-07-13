@@ -1,6 +1,5 @@
 use std::cmp::Reverse;
 use blandwork::Link;
-use maud::{html, Markup};
 
 use crate::Context;
 

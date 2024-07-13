@@ -7,9 +7,10 @@ publish = false
 
 [dependencies]
 blandwork = { path = "../blandwork" }
-axum = { version = "0.7.5" }
-maud = { version = "*", features = ["axum"]}
+axum = { version = "0.7.5", features = ["default", "macros", "multipart"] }
 tokio = { version = "1.25", features = ["full"] }
 tracing = { version = "0.1"}
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0.94" }
+minijinja = { version = "2.0.3", features = ["default", "v_htmlescape", "loader"] }
+minijinja-autoreload = { version = "2.0.3" }

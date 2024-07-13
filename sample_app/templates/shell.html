@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet" href="/web/dist/output.css" />
+    <script src="https://unpkg.com/htmx.org@1.9.9"></script>
+
+    <title>{% block title %}Default Title{% endblock %}</title>
+</head>
+<body hx-boost="true">
+    <b>NICE BOLD TEXT</b>
+    <div id="root" class="h-lvh bg-pink-500 lg:bg-green-500 md:bg-red-500 p-4">
+        <div class="flex flex-col justify-start w-full">
+            <header 
+                class="flex flex-col items-center">
+                <h1>HTML 5 Header with h1</h1>
+                <p>and a paragraph of sorts</p>
+            </header>
+            <nav 
+                class="flex flex-col items-center">
+                <h2>this is an h2</h2>
+                <h3>this is an h3</h3>
+            </nav>
+            <section 
+                class="flex flex-col items-center">
+                <button>standard button</button>
+                <button class="btn-primary">primary</button>
+                <button class="btn-secondary">secondary</button>
+            </section>
+            <div id="content">
+                {% block content %}
+                    {{ content|safe }}
+                {% endblock %}
+            </div>
+        </div>
+    </div>
+</body>
+</html>

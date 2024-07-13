@@ -1,69 +1,89 @@
-use std::{future::Future, pin::Pin, sync::Arc, 
-    task::{Context as TaskContext, Poll}
-};
-use tokio::sync::Mutex;
-
-use hyper::Response;
-use maud::{Markup, PreEscaped};
-use tower::{Layer, Service};
 use axum::{
-    body::{to_bytes, Body}, 
-    extract::Request, response::IntoResponse
-    // http:{Request, Response}
+    body::{to_bytes, Body, Bytes}, 
+    extract::Request, response::{Html, IntoResponse}
 };
+use axum_core::response::Response;
 
-use crate::{Context, ContextAccessor, Feature};
+use std::{future::Future, pin::Pin, sync::Arc, task::{Context as TaskContext, Poll}};
+use minijinja::{context, Template};
+use minijinja_autoreload::{AutoReloader, EnvironmentGuard};
+use hyper::StatusCode;
+use serde::Serialize;
+use tokio::sync::{Mutex, MutexGuard};
+use tower::{Layer, Service};
+use crate::{PageContext, ContextAccessor};
 
-/// Defines the root frame for rendering components
-pub trait Template: Clone + Send + Sync {
-    /// when called informs service not to use for this request
-    /// regardless of HTMX Boosted status.
-    fn ignore(&mut self) {
-        // default no-op
-    }
-
-    fn ignored(&self) -> bool { false }
-
-    fn register(&mut self, feature: &Box<dyn Feature>) {}
-
-    fn page(&self, context: &Context, body: Markup) -> Markup;
-}
 
 #[derive(Clone)]
-pub struct TemplateLayer<T: Template> {
-    template: T
-}
+pub struct TemplateAccessor(pub Arc<Mutex<AutoReloader>>);
 
-impl<T> TemplateLayer<T>
-where T: Template {
-    pub fn new(template: T) -> Self {
-        Self { template }
-    }
-}
+impl TemplateAccessor { 
+    pub async fn render<S: Serialize>(&self, template_name: &str, ctx: S) -> Response {
+        let reloader: MutexGuard<AutoReloader> = self.0.lock().await;
+        
+        let env: EnvironmentGuard = match reloader.acquire_env() {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("error acquiring template environment {:#?}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "").into_response();
+            }
+        };
 
-impl<S, T> Layer<S> for TemplateLayer<T>
-where T: Template {
-    type Service = TemplateService<S, T>;
+        let template: Template = match env.get_template(template_name){
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("error fetching template {:#?} {:#?}", template_name, e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "").into_response();
+            }
+        };
 
-    fn layer(&self, inner: S) -> Self::Service {
-        TemplateService { 
-            inner, 
-            template: self.template.clone(),
+        match template.render(ctx){
+            Ok(s) => {
+                (StatusCode::OK, Html(s)).into_response()
+            },
+            Err(e) => {
+                tracing::error!("error rendering template {:#?} {:#?}", template_name, e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "").into_response()
+            }
         }
     }
 }
 
 #[derive(Clone)]
-pub struct TemplateService<S, T> {
-    inner: S,
-    template: T
+pub struct TemplateLayer {
+    shell_template: String,
+    loader: TemplateAccessor
 }
 
-impl<S, T> Service<Request> for TemplateService<S, T>
+impl TemplateLayer{
+    pub fn new(shell_template: String, loader: TemplateAccessor) -> Self {
+        Self { shell_template, loader }
+    }
+}
+
+impl<S> Layer<S> for TemplateLayer {
+    type Service = TemplateService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        TemplateService { 
+            inner, 
+            shell_template: self.shell_template.clone(),
+            loader: self.loader.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct TemplateService<S> {
+    inner: S,
+    shell_template: String,
+    loader: TemplateAccessor 
+}
+
+impl<S> Service<Request> for TemplateService<S>
 where
     S: Service<Request, Response = Response<axum::body::Body>> + Send + 'static,
-    S::Future: Send + 'static,
-    T: Template + Clone + Send + Sync + 'static
+    S::Future: Send + 'static
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -77,29 +97,24 @@ where
 
         tracing::info!("Template request begin...");
 
-        let template: Arc<Mutex<T>> = Arc::new(Mutex::new(self.template.clone()));
+        let shell_template: String = self.shell_template.clone();
+        let loader: TemplateAccessor = self.loader.clone();
 
         let extensions = req.extensions_mut();
-        extensions.insert(template.clone());
+        extensions.insert( loader.clone());
 
         let accessor: ContextAccessor = extensions.get::<ContextAccessor>().unwrap().clone();
 
         let inner = self.inner.call(req);
         
         Box::pin(async move {
-            let mut response: Response<axum::body::Body> = inner.await?;
+            let response: Response<axum::body::Body> = inner.await?;
 
-            let context: Context = accessor.context().await;
+            let mut context: PageContext = accessor.get().await;
 
-            let template = template.lock().await;
-            
-            tracing::info!("Framework request end...");
+            tracing::info!("Template request end...");
 
             if context.is_boosted() {
-                return Ok(response);
-            }
-
-            if template.ignored() {
                 return Ok(response);
             }
 
@@ -107,19 +122,20 @@ where
 
             // read the entire inner response body into bytes
             // then convert to string and pass into page template
-            response = match to_bytes(body, usize::MAX).await {
-                Ok(s) => {
-                    let new_body = template.page(&context,
-                    PreEscaped(String::from_utf8(s.to_vec()).unwrap()));
-                    
-                    new_body.into_response()
-                },
-                Err(_e) => {
-                    Response::new("FAILED!".into())
+            let bytes: Bytes = match to_bytes(body, usize::MAX).await{
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!("error converting bytes {:#?}", e);
+                    return Ok((axum::http::StatusCode::INTERNAL_SERVER_ERROR, "").into_response());
                 }
             };
+            
+            let content: String = String::from_utf8(bytes.to_vec()).unwrap();
 
-            Ok(response)
+            Ok(loader.render(&shell_template, context!(
+                title => context.title(""), 
+                links => context.links(),
+                content => content)).await)
         })
     }
 

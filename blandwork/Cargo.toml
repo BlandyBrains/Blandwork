@@ -13,10 +13,11 @@ default = [ ]
 
 [dependencies]
 async-trait = { version = "0.1.74" }
-axum = { version = "0.7.5" }
+axum = { version = "0.7.5", features = ["default", "macros", "multipart"] }
 axum-core = { version = "0.4.3" }
 axum-htmx = { version = "0.5.0", features = ["guards"] }
-maud = { version = "*", features = ["axum"]}
+minijinja = { version = "2.0.3", features = ["default", "v_htmlescape", "loader"] }
+minijinja-autoreload = { version = "2.0.3" }
 bb8 = { version = "0.8.3" }
 bb8-postgres = { version = "0.8.1" }
 hyper-util = { version = "0.1.3" }

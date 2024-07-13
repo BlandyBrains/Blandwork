@@ -9,9 +9,11 @@ use axum::{extract::Request, http::HeaderValue};
 use axum_htmx::{HX_BOOSTED, HX_REQUEST, HX_TRIGGER};
 use hyper::{HeaderMap, Response};
 use serde::{ser::SerializeMap, Serialize};
-use serde_json::to_string;
+use serde_json::{json, to_string};
 use tower::{Layer, Service};
 use uuid::Uuid;
+
+use crate::{Config, Feature, Link};
 
 pub trait Serializable: Send + Sync {
     fn serialize(&self) -> String;
@@ -115,6 +117,7 @@ impl Display for Triggers {
 }
 
 pub struct Ctx {
+    pub title: String,
     pub context_id: String,
     pub path: String,
 
@@ -124,16 +127,17 @@ pub struct Ctx {
     // response triggers
     triggers: Triggers,
 
-    // features are accessed from layout!
-    // features: Vec<Box<dyn Feature>>
+    links: Vec<Link>
 }
 
 impl Ctx {
-    pub fn build(request: &Request) -> Self  {
+    pub fn build(config: &Config, links: Vec<Link>, request: &Request) -> Self  {
         let headers: HeaderMap = request.headers().clone();
         let path: String = request.uri().path().to_owned();
 
         Ctx {
+            links,
+            title: config.title.clone(),
             context_id: Uuid::new_v4().to_string(),
             path,
             headers,
@@ -146,31 +150,37 @@ impl Ctx {
 pub struct ContextAccessor(Arc<Mutex<Ctx>>);
 
 impl ContextAccessor { 
-    pub async fn context(&self) -> Context {
+    pub async fn get(&self) -> PageContext {
         let ctx = self.0.lock().await;
-        Context(ctx)
+        PageContext(ctx)
     }
 
-    pub fn from_request(request: &Request) -> Self {
-        let ctx: Ctx = Ctx::build(&request);
+    pub fn from_request(config: &Config, links: Vec<Link>, request: &Request) -> Self {
+        let ctx: Ctx = Ctx::build(&config, links, &request);
         return ContextAccessor(Arc::new(Mutex::new(ctx)));
     }
 }
 
-pub struct Context<'a>(MutexGuard<'a, Ctx>);
+pub struct PageContext<'a>(MutexGuard<'a, Ctx>);
 
-impl<'a> Context<'a> {
+impl<'a> PageContext<'a> {
 
-    pub fn title(&self) -> String {
-        // match self.navigator.current_link() {
-        //     Some(l) => {
-        //         l.title.to_owned()
-        //     },
-        //     None => {
-        //         "".to_owned()
-        //     }
-        // }
-        "".to_owned()
+    pub fn title(&mut self, section: &str) -> String {
+        let title: String;
+
+        if section.len() > 0 {
+            title =  format!("{} | {}", self.0.title, section);
+        } else {
+            title = format!("{}", self.0.title);
+        }
+        self.0.title = title.clone();
+        self.add_trigger("titleUpdate".to_owned(), json!({ "title": title.clone() }));
+        
+        return title;
+    }
+
+    pub fn links(&self) -> Vec<Link> {
+        return self.0.links.clone();
     }
 
     pub fn id(&self) -> String {
@@ -199,11 +209,18 @@ impl<'a> Context<'a> {
 }
 
 #[derive(Clone)]
-pub struct ContextLayer;
+pub struct ContextLayer {
+    config: Arc<Config>,
+    links: Vec<Link>
+}
 
 impl ContextLayer {
-    pub fn new() -> Self {
-        Self { }
+    pub fn new(config: Arc<Config>) -> Self {
+        Self { config, links: vec![] }
+    }
+
+    pub fn add_link(&mut self, link: Link) {
+        self.links.push(link);
     }
 }
 
@@ -212,6 +229,8 @@ impl<S> Layer<S> for ContextLayer {
 
     fn layer(&self, inner: S) -> Self::Service {
         ContextService { 
+            config: self.config.clone(),
+            links: self.links.clone(),
             inner,
         }
     }
@@ -219,6 +238,8 @@ impl<S> Layer<S> for ContextLayer {
 
 #[derive(Clone)]
 pub struct ContextService<S> {
+    config: Arc<Config>,
+    links: Vec<Link>,
     inner: S,
 }
 
@@ -239,7 +260,7 @@ where
         tracing::info!("context layer start");
 
         // build context
-        let accessor: ContextAccessor = ContextAccessor::from_request(&req);
+        let accessor: ContextAccessor = ContextAccessor::from_request(&self.config, self.links.clone(), &req);
 
         // send the context into the handler
         let extensions = req.extensions_mut();
@@ -250,16 +271,19 @@ where
         Box::pin(async move {
             let mut response: Response<axum::body::Body> = inner.await?;
 
-            let context: Context = accessor.context().await;
+            let context: PageContext = accessor.get().await;
 
             tracing::info!("context layer wrap {:#?}", context.is_boosted());
             
+            // only fire events on boosted requests
+            // they will not register on initial load
             if context.is_boosted() {
                 // HX-Trigger https://htmx.org/headers/hx-trigger/
                 let mut headers: HeaderMap = HeaderMap::new();
                 headers.insert(HX_TRIGGER, context.triggers());
                 response.headers_mut().extend(headers);
             }
+
             tracing::info!("context layer end");
             Ok(response)
         })
