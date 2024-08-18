@@ -47,17 +47,51 @@ impl TemplateAccessor {
             }
         }
     }
+
+    pub async fn render_block<S: Serialize>(&self, template_name: &str, block_name: &str, ctx: S) -> Response {
+        let reloader: MutexGuard<AutoReloader> = self.0.lock().await;
+        
+        let env: EnvironmentGuard = match reloader.acquire_env() {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("error acquiring template environment {:#?}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "").into_response();
+            }
+        };
+
+        let template: Template = match env.get_template(template_name){
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("error fetching template {:#?} {:#?}", template_name, e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "").into_response();
+            }
+        };
+
+        let mut state = template.eval_to_state(ctx).unwrap();
+
+
+        match state.render_block(block_name){
+            Ok(s) => {
+                (StatusCode::OK, Html(s)).into_response()
+            },
+            Err(e) => {
+                tracing::error!("error rendering template {:#?} {:#?}", template_name, e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "").into_response()
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct TemplateLayer {
     shell_template: String,
+    always_boost: bool,
     loader: TemplateAccessor
 }
 
 impl TemplateLayer{
-    pub fn new(shell_template: String, loader: TemplateAccessor) -> Self {
-        Self { shell_template, loader }
+    pub fn new(shell_template: String, always_boost: bool, loader: TemplateAccessor) -> Self {
+        Self { shell_template, always_boost, loader }
     }
 }
 
@@ -67,6 +101,7 @@ impl<S> Layer<S> for TemplateLayer {
     fn layer(&self, inner: S) -> Self::Service {
         TemplateService { 
             inner, 
+            always_boost: self.always_boost.clone(),
             shell_template: self.shell_template.clone(),
             loader: self.loader.clone(),
         }
@@ -76,6 +111,7 @@ impl<S> Layer<S> for TemplateLayer {
 #[derive(Clone)]
 pub struct TemplateService<S> {
     inner: S,
+    always_boost: bool,
     shell_template: String,
     loader: TemplateAccessor 
 }
@@ -97,6 +133,7 @@ where
 
         tracing::info!("Template request begin...");
 
+        let always_boost: bool = self.always_boost.clone();
         let shell_template: String = self.shell_template.clone();
         let loader: TemplateAccessor = self.loader.clone();
 
@@ -114,7 +151,7 @@ where
 
             tracing::info!("Template request end...");
 
-            if context.is_boosted() {
+            if context.is_boosted() || always_boost {
                 return Ok(response);
             }
 

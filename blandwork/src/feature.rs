@@ -1,10 +1,13 @@
 use axum::Router;
 use serde::Serialize;
 
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Link {
     pub name: String,
     pub route: String,
+    pub expandable: bool,
+    pub template: Option<String>,
     pub icon: Option<String>,
     pub css: Option<String>
 }
@@ -43,5 +46,3 @@ pub trait Feature {
         return None;
     }
 }
-
-pub type FeatureError = Box<dyn std::error::Error>;

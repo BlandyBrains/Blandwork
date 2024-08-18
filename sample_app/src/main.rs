@@ -1,4 +1,4 @@
-use axum::response::{Html, IntoResponse};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Extension, Router};
 use blandwork::{App, Config, ContextAccessor, Feature, Link, TemplateAccessor};
@@ -44,6 +44,8 @@ impl Feature for SampleFeature {
         Some(Link {
             name: "A".to_string(),
             route: "/sample/web".to_string(),
+            expandable: false,
+            template: None,
             icon: None,
             css: None
         })

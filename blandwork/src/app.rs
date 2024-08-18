@@ -1,4 +1,4 @@
-use std::{mem, str::FromStr, sync::Arc, time::Duration, vec};
+use std::{mem, str::FromStr, sync::Arc, time::{self, Duration}, vec};
 use axum::{ response::IntoResponse, Extension, Router};
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
@@ -6,6 +6,7 @@ use hyper::StatusCode;
 use minijinja::{path_loader, Environment};
 use minijinja_autoreload::AutoReloader;
 use tokio::{net::TcpListener, sync::Mutex};
+use tower_sessions::SessionManagerLayer;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 use tower::builder::ServiceBuilder;
 use tower_http::{
@@ -15,7 +16,9 @@ use tower_http::{
     trace::TraceLayer};
 
 use crate::{
-    context::ContextLayer, db::ConnectionPool, feature::Feature, template::TemplateLayer, Config, TemplateAccessor
+    context::ContextLayer, db::ConnectionPool, 
+    feature::Feature, template::TemplateLayer, 
+    Config, PostgreSessionStore, TemplateAccessor
 };
 
 #[derive(Clone)]
@@ -40,6 +43,9 @@ pub struct App<P, F> {
     // they can reference the current theme in their handlers.
     features: F,
 
+    // session store
+    session: Option<PostgreSessionStore>,
+
     // optional and only matters for Extension() on router
     // Features could use it in their handlers, but we can't know that during build.
     pub pool: P,
@@ -63,6 +69,7 @@ impl App<NoPool, NoFeatures> {
             autoloader,
             router: Router::new(),
             pool: NoPool,
+            session: None,
             features: NoFeatures,
         }
     }
@@ -89,6 +96,7 @@ impl App<NoPool, NoFeatures> {
             config: self.config.clone(),
             router: self.router.clone(),
             pool,
+            session: self.session.clone(),
             features: NoFeatures,
             autoloader: self.autoloader.clone(),
         };
@@ -104,6 +112,7 @@ impl App<NoPool, NoFeatures> {
             router: self.router.clone(),
             autoloader: self.autoloader.clone(),
             pool: NoPool,
+            session: self.session.clone(),
             features,
         };
     }
@@ -117,6 +126,7 @@ impl App<NoPool, NoFeatures> {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: NoPool,
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
         };
@@ -134,6 +144,7 @@ impl App<NoPool, Features> {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: NoPool,
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
         };
@@ -149,6 +160,7 @@ impl App<NoPool, Features> {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: NoPool,
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
         };
@@ -167,6 +179,7 @@ impl App<NoPool, Features> {
         return App { 
             config: self.config.clone(),
             pool: NoPool,
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             router,
             features
@@ -182,6 +195,7 @@ impl App<NoPool, Features> {
         return App {
             config: self.config.clone(),
             pool: NoPool,
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             router,
             features,
@@ -217,7 +231,11 @@ impl App<NoPool, Features> {
             router = match feature.supplemental() {
                 Some(mut supp) => {
                     supp = supp
-                        .layer(context_layer.clone());
+                    .layer(TemplateLayer::new(
+                        self.config.server.shell_template.clone(),
+                        true,
+                    self.autoloader.clone()))
+                    .layer(context_layer.clone());
                     
                     router.merge(supp)
                 }, 
@@ -229,6 +247,7 @@ impl App<NoPool, Features> {
                     web = web
                         .layer(TemplateLayer::new(
                             self.config.server.shell_template.clone(),
+                            false,
                         self.autoloader.clone()))
                         .layer(context_layer.clone());
                     
@@ -269,13 +288,14 @@ impl App<NoPool, Features> {
                     // Vanilla middleware
                     .layer(CorsLayer::new())
                     .layer(CompressionLayer::new())
-                    .layer(TimeoutLayer::new(Duration::from_secs(10)))
+                    .layer(TimeoutLayer::new(time::Duration::from_secs(10)))
             );
 
         return App {
             config: self.config.clone(),
             pool: self.pool.clone(),
             autoloader: self.autoloader.clone(),
+            session: self.session.clone(),
             features: Vec::new(),
             router,
         };
@@ -307,6 +327,7 @@ impl App<ConnectionPool, NoFeatures> {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: self.pool.clone(),
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
         };
@@ -321,8 +342,25 @@ impl App<ConnectionPool, NoFeatures> {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: self.pool.clone(),
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
+        };
+    }
+
+    pub fn apply_session(&self, schema: &str, table: &str) -> App<ConnectionPool, NoFeatures> {
+        let session_store: PostgreSessionStore = PostgreSessionStore::new(
+            &self.pool,
+            schema.to_string(),
+            table.to_string()
+        );
+        return App { 
+            config: self.config.clone(),
+            router: self.router.clone(),
+            pool: self.pool.clone(),
+            session: Some(session_store),
+            autoloader: self.autoloader.clone(),
+            features: NoFeatures,
         };
     }
 }
@@ -338,6 +376,7 @@ impl App<ConnectionPool, Features> {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: self.pool.clone(),
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
         };
@@ -353,6 +392,7 @@ impl App<ConnectionPool, Features> {
             config: self.config.clone(),
             router: self.router.clone(),
             pool: self.pool.clone(),
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
         };
@@ -371,6 +411,7 @@ impl App<ConnectionPool, Features> {
         return App { 
             config: self.config.clone(),
             pool: self.pool.clone(),
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             router,
             features
@@ -386,8 +427,27 @@ impl App<ConnectionPool, Features> {
         return App {
             config: self.config.clone(),
             pool: self.pool.clone(),
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             router,
+            features,
+        };
+    }
+
+    pub fn apply_session(&mut self, schema: &str, table: &str) -> App<ConnectionPool, Features> {
+        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
+        
+        let session_store: PostgreSessionStore = PostgreSessionStore::new(
+            &self.pool,
+            schema.to_string(),
+            table.to_string()
+        );
+        return App { 
+            config: self.config.clone(),
+            router: self.router.clone(),
+            pool: self.pool.clone(),
+            session: Some(session_store),
+            autoloader: self.autoloader.clone(),
             features,
         };
     }
@@ -398,7 +458,7 @@ impl App<ConnectionPool, Features> {
 
         let mut context_layer: ContextLayer = ContextLayer::new(self.config.clone());
 
-        // 1. scan features and extract links for navigator
+        // 1. scan features and extract links for navigator 
         for feature in features.iter() {
             match feature.link() {
                 Some(link) => {
@@ -412,7 +472,8 @@ impl App<ConnectionPool, Features> {
         for feature in features.iter() {
             router = match feature.api() {
                 Some(mut api) => {
-                    api = api.layer(context_layer.clone());
+                    api = api
+                        .layer(context_layer.clone());
 
                     router.merge(api)
                 }, 
@@ -422,7 +483,10 @@ impl App<ConnectionPool, Features> {
             router = match feature.supplemental() {
                 Some(mut supp) => {
                     supp = supp
-                        .layer(context_layer.clone());
+                    .layer(TemplateLayer::new(self.config.server.shell_template.clone(), 
+                    true, 
+                    self.autoloader.clone()))
+                    .layer(context_layer.clone());
                     
                     router.merge(supp)
                 }, 
@@ -432,7 +496,9 @@ impl App<ConnectionPool, Features> {
             router = match feature.web() {
                 Some(mut web) => {
                     web = web
-                        .layer(TemplateLayer::new(self.config.server.shell_template.clone(), self.autoloader.clone()))
+                        .layer(TemplateLayer::new(self.config.server.shell_template.clone(), 
+                        false, 
+                        self.autoloader.clone()))
                         .layer(context_layer.clone());
                        
                     router.merge(web)
@@ -478,12 +544,23 @@ impl App<ConnectionPool, Features> {
 
             // base extensions (database connection)
             .layer(Extension(self.pool.clone()));
-            
+
             // others? Feature specific data/configurations?
+
+        // apply session layer
+        if self.session.is_some() {
+            let store: PostgreSessionStore = self.session.clone().unwrap();
+            let session_layer: SessionManagerLayer<PostgreSessionStore> = SessionManagerLayer::new(store)
+            .with_secure(false);
+            // .with_expiry(Expiry::OnInactivity(core::time::Duration::from_secs(10)));
+            
+            router = router.layer(session_layer);
+        }
 
         return App {
             config: self.config.clone(),
             pool: self.pool.clone(),
+            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
             router,

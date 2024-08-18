@@ -273,7 +273,7 @@ where
 
             let context: PageContext = accessor.get().await;
 
-            tracing::info!("context layer wrap {:#?}", context.is_boosted());
+            tracing::info!("context layer wrap is_boosted:{:#?} is_htmx:{:#?}", context.is_boosted(), context.is_htmx());
             
             // only fire events on boosted requests
             // they will not register on initial load
