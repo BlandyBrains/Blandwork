@@ -13,7 +13,7 @@ use serde_json::{json, to_string};
 use tower::{Layer, Service};
 use uuid::Uuid;
 
-use crate::{Config, Feature, Link};
+use crate::{Config, Link};
 
 pub trait Serializable: Send + Sync {
     fn serialize(&self) -> String;
