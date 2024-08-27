@@ -84,14 +84,13 @@ impl TemplateAccessor {
 
 #[derive(Clone)]
 pub struct TemplateLayer {
-    shell_template: String,
-    always_boost: bool,
+    shell_template: Option<String>,
     loader: TemplateAccessor
 }
 
 impl TemplateLayer{
-    pub fn new(shell_template: String, always_boost: bool, loader: TemplateAccessor) -> Self {
-        Self { shell_template, always_boost, loader }
+    pub fn new(shell_template: Option<String>, loader: TemplateAccessor) -> Self {
+        Self { shell_template, loader }
     }
 }
 
@@ -101,7 +100,6 @@ impl<S> Layer<S> for TemplateLayer {
     fn layer(&self, inner: S) -> Self::Service {
         TemplateService { 
             inner, 
-            always_boost: self.always_boost.clone(),
             shell_template: self.shell_template.clone(),
             loader: self.loader.clone(),
         }
@@ -111,14 +109,13 @@ impl<S> Layer<S> for TemplateLayer {
 #[derive(Clone)]
 pub struct TemplateService<S> {
     inner: S,
-    always_boost: bool,
-    shell_template: String,
+    shell_template: Option<String>,
     loader: TemplateAccessor 
 }
 
 impl<S> Service<Request> for TemplateService<S>
 where
-    S: Service<Request, Response = Response<axum::body::Body>> + Send + 'static,
+    S: Service<Request, Response = Response<axum::body::Body>> + Send + Clone + 'static,
     S::Future: Send + 'static
 {
     type Response = S::Response;
@@ -133,8 +130,7 @@ where
 
         tracing::info!("Template request begin...");
 
-        let always_boost: bool = self.always_boost.clone();
-        let shell_template: String = self.shell_template.clone();
+        let shell_template: Option<String> = self.shell_template.clone();
         let loader: TemplateAccessor = self.loader.clone();
 
         let extensions = req.extensions_mut();
@@ -142,16 +138,23 @@ where
 
         let accessor: ContextAccessor = extensions.get::<ContextAccessor>().unwrap().clone();
 
-        let inner = self.inner.call(req);
+        // let inner = self.inner.call(req);
         
+        // Because the inner service can panic until ready, we need to ensure we only
+        // use the ready service.
+        //
+        // See: https://docs.rs/tower/latest/tower/trait.Service.html#be-careful-when-cloning-inner-services
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+
         Box::pin(async move {
-            let response: Response<axum::body::Body> = inner.await?;
+            let response: Response<axum::body::Body> = inner.call(req).await?;
 
             let mut context: PageContext = accessor.get().await;
 
             tracing::info!("Template request end...");
 
-            if context.is_boosted() || always_boost {
+            if context.is_boosted() || shell_template.is_none() {
                 return Ok(response);
             }
 
@@ -169,7 +172,7 @@ where
             
             let content: String = String::from_utf8(bytes.to_vec()).unwrap();
 
-            Ok(loader.render(&shell_template, context!(
+            Ok(loader.render(&shell_template.unwrap(), context!(
                 title => context.title(""), 
                 links => context.links(),
                 content => content)).await)

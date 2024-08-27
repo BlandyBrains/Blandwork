@@ -5,8 +5,9 @@ mod features;
 mod db;
 mod context;
 mod template;
-mod session;
 mod error;
+mod session;
+mod authentication;
 
 pub use config::Config;
 pub use db::{Connection, ConnectionPool};
@@ -16,7 +17,9 @@ pub use context::{PageContext, ContextAccessor};
 pub use app::App;
 pub use template::{TemplateLayer, TemplateAccessor};
 pub use error::{BlandworkError, ValidationError};
-pub use session::{PostgreSessionStore, PostgresSessionError};
+pub use authentication::{AuthSession, Credentials, Vault, User};
+
+// pub use session::{PostgreSessionStore, PostgresSessionError};
 // pub use axum::{Router, routing::get, response::IntoResponse };
 // pub use hyper::{HeaderMap, StatusCode};
 

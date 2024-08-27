@@ -22,10 +22,6 @@ pub trait Feature {
         None
     }
 
-    // fn menu(&self) -> Option<Markup> {
-    //     None
-    // }
-
     /// API endpoints exposed from the feature
     fn api(&self) -> Option<Router> {
         return None;
@@ -43,6 +39,18 @@ pub trait Feature {
     /// These routes are wrapped in the Context and Template middleware, the template will ALWAYS be applied 
     /// if the incoming request is not HX-Boosted.
     fn web(&self) -> Option<Router> {
+        return None;
+    }
+
+    fn protected_api(&self) -> Option<Router> {
+        return None;
+    }
+
+    fn protected_supplemental(&self) -> Option<Router> {
+        return None;
+    }
+
+    fn protected_web(&self) -> Option<Router> {
         return None;
     }
 }

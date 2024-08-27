@@ -33,13 +33,13 @@ pub enum PostgresSessionError {
 // pub type SessionError = Box<dyn std::error::Error>;
 
 #[derive(Debug, Clone)]
-pub struct PostgreSessionStore {
+pub struct BlandworkSessionStore {
     pool: ConnectionPool,
     schema_name: String,
     table_name: String,
 }
 
-impl PostgreSessionStore {
+impl BlandworkSessionStore {
     pub fn new(pool: &ConnectionPool, schema: String, session_table: String) -> Self {
         Self {
             pool: pool.clone(),
@@ -50,7 +50,7 @@ impl PostgreSessionStore {
 }
 
 #[async_trait]
-impl ExpiredDeletion for PostgreSessionStore {
+impl ExpiredDeletion for BlandworkSessionStore {
     async fn delete_expired(&self) -> Result<()> {
         let query = format!(
             r#"
@@ -76,7 +76,7 @@ impl ExpiredDeletion for PostgreSessionStore {
 }
 
 #[async_trait]
-impl SessionStore for PostgreSessionStore {
+impl SessionStore for BlandworkSessionStore {
 
     // async fn create(&self, session_record: &mut Record) -> Result<()> {
     //     TODO - improved ID generation

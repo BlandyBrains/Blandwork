@@ -245,7 +245,7 @@ pub struct ContextService<S> {
 
 impl<S> Service<Request> for ContextService<S>
 where
-    S: Service<Request, Response = Response<axum::body::Body>>  + Send + 'static,
+    S: Service<Request, Response = Response<axum::body::Body>>  + Send + Clone + 'static,
     S::Future: Send + 'static
 {
     type Response = S::Response;
@@ -266,10 +266,12 @@ where
         let extensions = req.extensions_mut();
         extensions.insert( accessor.clone());
 
-        let inner = self.inner.call(req);
+        // See: https://docs.rs/tower/latest/tower/trait.Service.html#be-careful-when-cloning-inner-services
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
 
         Box::pin(async move {
-            let mut response: Response<axum::body::Body> = inner.await?;
+            let mut response: Response<axum::body::Body> = inner.call(req).await?;
 
             let context: PageContext = accessor.get().await;
 

@@ -1,12 +1,13 @@
-use std::{mem, str::FromStr, sync::Arc, time::{self, Duration}, vec};
+use std::{mem, str::FromStr, sync::Arc, time::Duration, vec};
 use axum::{ response::IntoResponse, Extension, Router};
+use axum_login::{AuthManagerLayer, AuthManagerLayerBuilder};
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use hyper::StatusCode;
 use minijinja::{path_loader, Environment};
 use minijinja_autoreload::AutoReloader;
 use tokio::{net::TcpListener, sync::Mutex};
-use tower_sessions::SessionManagerLayer;
+use tower_sessions::{cookie::Key, Expiry, SessionManagerLayer};
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 use tower::builder::ServiceBuilder;
 use tower_http::{
@@ -16,9 +17,7 @@ use tower_http::{
     trace::TraceLayer};
 
 use crate::{
-    context::ContextLayer, db::ConnectionPool, 
-    feature::Feature, template::TemplateLayer, 
-    Config, PostgreSessionStore, TemplateAccessor
+    authentication::Vault, context::ContextLayer, db::ConnectionPool, feature::Feature, session::BlandworkSessionStore, template::TemplateLayer, Config, TemplateAccessor
 };
 
 #[derive(Clone)]
@@ -28,6 +27,12 @@ pub struct NoPool;
 pub struct NoFeatures;
 
 pub type Features = Vec<Box<dyn Feature>>;
+
+#[derive(Clone)]
+pub struct Sessions {
+    common: SessionManagerLayer<BlandworkSessionStore, tower_sessions::service::SignedCookie>,
+    protected: AuthManagerLayer<Vault, BlandworkSessionStore, tower_sessions::service::SignedCookie>
+}
 
 pub struct App<P, F> {
     // application configuration
@@ -39,12 +44,12 @@ pub struct App<P, F> {
     // template reloader
     autoloader: TemplateAccessor,
 
+    // sessions
+    sessions: Option<Sessions>,
+
     // features should be decoupled from navigator/template/theme.
     // they can reference the current theme in their handlers.
     features: F,
-
-    // session store
-    session: Option<PostgreSessionStore>,
 
     // optional and only matters for Extension() on router
     // Features could use it in their handlers, but we can't know that during build.
@@ -67,9 +72,9 @@ impl App<NoPool, NoFeatures> {
         App {
             config: Arc::new(config),
             autoloader,
+            sessions: None,
             router: Router::new(),
             pool: NoPool,
-            session: None,
             features: NoFeatures,
         }
     }
@@ -96,7 +101,7 @@ impl App<NoPool, NoFeatures> {
             config: self.config.clone(),
             router: self.router.clone(),
             pool,
-            session: self.session.clone(),
+            sessions: None,
             features: NoFeatures,
             autoloader: self.autoloader.clone(),
         };
@@ -110,9 +115,9 @@ impl App<NoPool, NoFeatures> {
         return App { 
             config: self.config.clone(),
             router: self.router.clone(),
+            sessions: None,
             autoloader: self.autoloader.clone(),
             pool: NoPool,
-            session: self.session.clone(),
             features,
         };
     }
@@ -125,8 +130,8 @@ impl App<NoPool, NoFeatures> {
         return App { 
             config: self.config.clone(),
             router: self.router.clone(),
+            sessions: None,
             pool: NoPool,
-            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
         };
@@ -143,8 +148,8 @@ impl App<NoPool, Features> {
         return App { 
             config: self.config.clone(),
             router: self.router.clone(),
+            sessions: None,
             pool: NoPool,
-            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
         };
@@ -159,8 +164,8 @@ impl App<NoPool, Features> {
         return App { 
             config: self.config.clone(),
             router: self.router.clone(),
+            sessions: None,
             pool: NoPool,
-            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             features,
         };
@@ -178,8 +183,8 @@ impl App<NoPool, Features> {
 
         return App { 
             config: self.config.clone(),
+            sessions: None,
             pool: NoPool,
-            session: self.session.clone(),
             autoloader: self.autoloader.clone(),
             router,
             features
@@ -195,7 +200,7 @@ impl App<NoPool, Features> {
         return App {
             config: self.config.clone(),
             pool: NoPool,
-            session: self.session.clone(),
+            sessions: None,
             autoloader: self.autoloader.clone(),
             router,
             features,
@@ -203,256 +208,6 @@ impl App<NoPool, Features> {
     }
 
     pub fn build(&mut self) -> App<NoPool, Features>{
-        let mut router: Router = mem::replace(&mut self.router, Router::new());
-        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
-    
-        let mut context_layer: ContextLayer = ContextLayer::new(self.config.clone());
-
-        // 1. scan features and extract links for navigator
-        for feature in features.iter() {
-            match feature.link() {
-                Some(link) => {
-                    context_layer.add_link(link);
-                },
-                _ => {}
-            }
-        }
-
-        for feature in features.into_iter() {
-            router = match feature.api() {
-                Some(mut api) => {
-                    api = api.layer(context_layer.clone());
-
-                    router.merge(api)
-                }, 
-                None => router
-            };
-
-            router = match feature.supplemental() {
-                Some(mut supp) => {
-                    supp = supp
-                    .layer(TemplateLayer::new(
-                        self.config.server.shell_template.clone(),
-                        true,
-                    self.autoloader.clone()))
-                    .layer(context_layer.clone());
-                    
-                    router.merge(supp)
-                }, 
-                None => router
-            };
-
-            router = match feature.web() {
-                Some(mut web) => {
-                    web = web
-                        .layer(TemplateLayer::new(
-                            self.config.server.shell_template.clone(),
-                            false,
-                        self.autoloader.clone()))
-                        .layer(context_layer.clone());
-                    
-                    router.merge(web)
-                }, 
-                None => router
-            };
-        }
-    
-        router = router
-
-            // web assets (css, javascript, etc)
-            // .nest_service("/web", ServeDir::new(self.config.server.asset_path.clone()))
-            
-            // core layers
-            .layer(
-                ServiceBuilder::new()
-                
-                    // build a layer for handling HTMX templating
-                    // requirements
-                        // define navigator (remove from extension)
-                        // handle boost/non-boosted request
-                    
-                    // raw handlers only need to return
-
-                    // requires more finesse
-                    // https://docs.rs/axum/latest/axum/error_handling/index.html
-
-                    // .layer(HandleErrorLayer::new(|m: Method, u: Uri, e: BoxError| async {
-                    //     (
-                    //     hyper::StatusCode::REQUEST_TIMEOUT,
-                    //     format!("ERROR {:#?}", e)
-                    //     )
-                    // }))
-                
-                    .layer(TraceLayer::new_for_http())
-                    
-                    // Vanilla middleware
-                    .layer(CorsLayer::new())
-                    .layer(CompressionLayer::new())
-                    .layer(TimeoutLayer::new(time::Duration::from_secs(10)))
-            );
-
-        return App {
-            config: self.config.clone(),
-            pool: self.pool.clone(),
-            autoloader: self.autoloader.clone(),
-            session: self.session.clone(),
-            features: Vec::new(),
-            router,
-        };
-    }
-
-    pub async fn run(&mut self) {
-        let listener: TcpListener = TcpListener::bind(format!("{host}:{port}", host=self.config.server.host, port=self.config.server.port))
-            .await
-            .unwrap();
-        
-        // tracing_subscriber::fmt::fmt().with_env_filter(EnvFilter::from_default_env()).init();
-        let stdout = tracing_subscriber::fmt::layer().pretty();
-        let subscriber = Registry::default().with(stdout);
-    
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("Unable to set global subscriber");
-        
-        axum::serve(listener, self.router.clone()).await.unwrap();
-    }
-}
-
-impl App<ConnectionPool, NoFeatures> {
-    pub fn register_feature_default<F: Feature + Default + 'static>(&self) ->  App<ConnectionPool, Features>{         
-        let features: Vec<Box<dyn Feature + 'static>> = vec![
-            Box::new(F::default())
-        ];
-
-        return App { 
-            config: self.config.clone(),
-            router: self.router.clone(),
-            pool: self.pool.clone(),
-            session: self.session.clone(),
-            autoloader: self.autoloader.clone(),
-            features,
-        };
-    }
-
-    pub fn register_feature(&self, feature: impl Feature + 'static) ->  App<ConnectionPool, Features>{         
-        let features: Vec<Box<dyn Feature + 'static>> = vec![
-            Box::new(feature)
-        ];
-
-        return App { 
-            config: self.config.clone(),
-            router: self.router.clone(),
-            pool: self.pool.clone(),
-            session: self.session.clone(),
-            autoloader: self.autoloader.clone(),
-            features,
-        };
-    }
-
-    pub fn apply_session(&self, schema: &str, table: &str) -> App<ConnectionPool, NoFeatures> {
-        let session_store: PostgreSessionStore = PostgreSessionStore::new(
-            &self.pool,
-            schema.to_string(),
-            table.to_string()
-        );
-        return App { 
-            config: self.config.clone(),
-            router: self.router.clone(),
-            pool: self.pool.clone(),
-            session: Some(session_store),
-            autoloader: self.autoloader.clone(),
-            features: NoFeatures,
-        };
-    }
-}
-
-impl App<ConnectionPool, Features> {
-    pub fn register_feature_default<F: Feature + Default + 'static>(&mut self) ->  App<ConnectionPool, Features>{
-        self.features.push(Box::new(F::default()));
-
-        // relocate features into new App
-        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
-
-        return App { 
-            config: self.config.clone(),
-            router: self.router.clone(),
-            pool: self.pool.clone(),
-            session: self.session.clone(),
-            autoloader: self.autoloader.clone(),
-            features,
-        };
-    }
-
-    pub fn register_feature(&mut self, feature: impl Feature + 'static) ->  App<ConnectionPool, Features>{         
-        self.features.push(Box::new(feature));
-
-        // relocate features into new App
-        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
-
-        return App { 
-            config: self.config.clone(),
-            router: self.router.clone(),
-            pool: self.pool.clone(),
-            session: self.session.clone(),
-            autoloader: self.autoloader.clone(),
-            features,
-        };
-    }
-
-    pub fn apply_fallback(&mut self) -> App<ConnectionPool, Features> {
-        let mut router: Router = mem::replace(&mut self.router, Router::new());
-        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
-
-        async fn handler_404() -> impl IntoResponse {
-            (StatusCode::NOT_FOUND, "nothing to see here")
-        }
-
-        router = router.fallback(handler_404);
-
-        return App { 
-            config: self.config.clone(),
-            pool: self.pool.clone(),
-            session: self.session.clone(),
-            autoloader: self.autoloader.clone(),
-            router,
-            features
-        };
-    }
-
-    pub fn apply_extension<S: Clone + Send + Sync + 'static>(&mut self, state: S) -> App<ConnectionPool, Features> {
-        let mut router: Router = mem::replace(&mut self.router, Router::new());
-        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
-        
-        router = router.layer(Extension(state));
-
-        return App {
-            config: self.config.clone(),
-            pool: self.pool.clone(),
-            session: self.session.clone(),
-            autoloader: self.autoloader.clone(),
-            router,
-            features,
-        };
-    }
-
-    pub fn apply_session(&mut self, schema: &str, table: &str) -> App<ConnectionPool, Features> {
-        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
-        
-        let session_store: PostgreSessionStore = PostgreSessionStore::new(
-            &self.pool,
-            schema.to_string(),
-            table.to_string()
-        );
-        return App { 
-            config: self.config.clone(),
-            router: self.router.clone(),
-            pool: self.pool.clone(),
-            session: Some(session_store),
-            autoloader: self.autoloader.clone(),
-            features,
-        };
-    }
-
-    pub fn build(&mut self) -> App<ConnectionPool, Features>{
         let mut router: Router = mem::replace(&mut self.router, Router::new());
         let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
 
@@ -483,8 +238,7 @@ impl App<ConnectionPool, Features> {
             router = match feature.supplemental() {
                 Some(mut supp) => {
                     supp = supp
-                    .layer(TemplateLayer::new(self.config.server.shell_template.clone(), 
-                    true, 
+                    .layer(TemplateLayer::new(None,
                     self.autoloader.clone()))
                     .layer(context_layer.clone());
                     
@@ -496,8 +250,7 @@ impl App<ConnectionPool, Features> {
             router = match feature.web() {
                 Some(mut web) => {
                     web = web
-                        .layer(TemplateLayer::new(self.config.server.shell_template.clone(), 
-                        false, 
+                        .layer(TemplateLayer::new(Some(self.config.server.shell_template.clone()),
                         self.autoloader.clone()))
                         .layer(context_layer.clone());
                        
@@ -508,63 +261,28 @@ impl App<ConnectionPool, Features> {
         }
     
         router = router
-
-            // web assets (css, javascript, etc)
-            // .nest_service("/web", ServeDir::new(self.config.server.asset_path.clone()))
-            
             // core layers
             .layer(
                 ServiceBuilder::new()
-                
-                    // build a layer for handling HTMX templating
-                    // requirements
-                        // define navigator (remove from extension)
-                        // handle boost/non-boosted request
-                    
-                    // raw handlers only need to return
-
-                    // requires more finesse
-                    // https://docs.rs/axum/latest/axum/error_handling/index.html
-
-                    // .layer(HandleErrorLayer::new(|m: Method, u: Uri, e: BoxError| async {
-                    //     (
-                    //     hyper::StatusCode::REQUEST_TIMEOUT,
-                    //     format!("ERROR {:#?}", e)
-                    //     )
-                    // }))
-                
                     .layer(TraceLayer::new_for_http())
                     
                     // Vanilla middleware
                     .layer(CorsLayer::new())
                     .layer(CompressionLayer::new())
                     .layer(TimeoutLayer::new(Duration::from_secs(10)))
-                        
             )
 
             // base extensions (database connection)
             .layer(Extension(self.pool.clone()));
 
-            // others? Feature specific data/configurations?
-
-        // apply session layer
-        if self.session.is_some() {
-            let store: PostgreSessionStore = self.session.clone().unwrap();
-            let session_layer: SessionManagerLayer<PostgreSessionStore> = SessionManagerLayer::new(store)
-            .with_secure(false);
-            // .with_expiry(Expiry::OnInactivity(core::time::Duration::from_secs(10)));
-            
-            router = router.layer(session_layer);
-        }
-
-        return App {
+        App {
             config: self.config.clone(),
-            pool: self.pool.clone(),
-            session: self.session.clone(),
+            pool: NoPool,
+            sessions: None,
             autoloader: self.autoloader.clone(),
             features,
             router,
-        };
+        }
     }
 
     pub async fn run(&mut self) {
@@ -583,7 +301,268 @@ impl App<ConnectionPool, Features> {
     }
 }
 
-#[cfg(test)]
-mod test {
+impl App<ConnectionPool, NoFeatures> {
+    pub fn register_feature_default<F: Feature + Default + 'static>(&self) ->  App<ConnectionPool, Features>{         
+        let features: Vec<Box<dyn Feature + 'static>> = vec![
+            Box::new(F::default())
+        ];
 
+        return App { 
+            config: self.config.clone(),
+            router: self.router.clone(),
+            sessions: self.sessions.clone(),
+            pool: self.pool.clone(),
+            autoloader: self.autoloader.clone(),
+            features,
+        };
+    }
+
+    pub fn register_feature(&self, feature: impl Feature + 'static) ->  App<ConnectionPool, Features>{         
+        let features: Vec<Box<dyn Feature + 'static>> = vec![
+            Box::new(feature)
+        ];
+
+        return App { 
+            config: self.config.clone(),
+            router: self.router.clone(),
+            sessions: self.sessions.clone(),
+            pool: self.pool.clone(),
+            autoloader: self.autoloader.clone(),
+            features,
+        };
+    }
+}
+
+impl App<ConnectionPool, Features> {
+    pub fn register_feature_default<F: Feature + Default + 'static>(&mut self) ->  App<ConnectionPool, Features>{
+        self.features.push(Box::new(F::default()));
+
+        // relocate features into new App
+        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
+
+        return App { 
+            config: self.config.clone(),
+            router: self.router.clone(),
+            sessions: self.sessions.clone(),
+            pool: self.pool.clone(),
+            autoloader: self.autoloader.clone(),
+            features,
+        };
+    }
+
+    pub fn register_feature(&mut self, feature: impl Feature + 'static) ->  App<ConnectionPool, Features>{         
+        self.features.push(Box::new(feature));
+
+        // relocate features into new App
+        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
+
+        return App { 
+            config: self.config.clone(),
+            router: self.router.clone(),
+            sessions: self.sessions.clone(),
+            pool: self.pool.clone(),
+            autoloader: self.autoloader.clone(),
+            features,
+        };
+    }
+
+    pub fn apply_fallback(&mut self) -> App<ConnectionPool, Features> {
+        let mut router: Router = mem::replace(&mut self.router, Router::new());
+        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
+
+        async fn handler_404() -> impl IntoResponse {
+            (StatusCode::NOT_FOUND, "nothing to see here")
+        }
+
+        router = router.fallback(handler_404);
+
+        return App { 
+            config: self.config.clone(),
+            pool: self.pool.clone(),
+            sessions: self.sessions.clone(),
+            autoloader: self.autoloader.clone(),
+            router,
+            features
+        };
+    }
+
+    pub fn apply_extension<S: Clone + Send + Sync + 'static>(&mut self, state: S) -> App<ConnectionPool, Features> {
+        let mut router: Router = mem::replace(&mut self.router, Router::new());
+        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
+        
+        router = router.layer(Extension(state));
+
+        return App {
+            config: self.config.clone(),
+            pool: self.pool.clone(),
+            sessions: self.sessions.clone(),
+            autoloader: self.autoloader.clone(),
+            router,
+            features,
+        };
+    }
+
+    pub fn build(&mut self) -> App<ConnectionPool, Features>{
+        let mut router: Router = mem::replace(&mut self.router, Router::new());
+        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
+
+        let mut context_layer: ContextLayer = ContextLayer::new(self.config.clone());
+
+        // 1. scan features and extract links for navigator 
+        for feature in features.iter() {
+            match feature.link() {
+                Some(link) => {
+                    context_layer.add_link(link);
+                },
+                _ => {}
+            }
+        }
+
+        // 2. scan features and apply routers
+        for feature in features.iter() {
+            router = match feature.api() {
+                Some(mut r) => {
+                    r = r.layer(context_layer.clone());
+                    router.merge(r)
+                }, 
+                None => router
+            };
+
+            router = match feature.supplemental() {
+                Some(mut r) => {
+                    r = r.layer(TemplateLayer::new(None,
+                    self.autoloader.clone()))
+                        .layer(context_layer.clone());
+                    router.merge(r)
+                }, 
+                None => router
+            };
+
+            router = match feature.web() {
+                Some(mut r) => {
+                    r = r
+                        .layer(TemplateLayer::new(Some(self.config.server.shell_template.clone()),
+                        self.autoloader.clone()))
+                        .layer(context_layer.clone());
+                    router.merge(r)
+                }, 
+                None => router
+            };
+
+            router = match feature.protected_api() {
+                Some(mut r) => {
+                    r = r
+                        .layer(context_layer.clone());
+                    router.merge(r)
+                }, 
+                None => router
+            };
+
+            router = match feature.protected_supplemental() {
+                Some(mut r) => {
+                    r = r
+                        .layer(TemplateLayer::new(None, self.autoloader.clone()))
+                        .layer(context_layer.clone());
+
+                        router.merge(r)
+                }, 
+                None => router
+            };
+
+            router = match feature.protected_web() {
+                Some(mut r) => {
+                    r = r
+                        .layer(TemplateLayer::new(Some(self.config.server.shell_template.clone()),
+                        self.autoloader.clone()))
+                        .layer(context_layer.clone());
+                        
+                    router.merge(r)
+                }, 
+                None => router
+            };
+        }
+    
+        router = router
+
+            // core layers
+            .layer(
+                ServiceBuilder::new()
+                    .layer(TraceLayer::new_for_http())
+                    // Vanilla middleware
+                    .layer(CorsLayer::new())
+                    .layer(CompressionLayer::new())
+                    .layer(TimeoutLayer::new(Duration::from_secs(10)))
+            )
+
+            // base extensions (database connection)
+            .layer(Extension(self.pool.clone()));
+
+            if self.sessions.is_some(){
+                // apply global session
+                router = router
+                    .layer(self.sessions.clone().unwrap().common.clone())
+                    .layer(self.sessions.clone().unwrap().protected.clone());
+            }
+
+        App {
+            config: self.config.clone(),
+            pool: self.pool.clone(),
+            sessions: self.sessions.clone(),
+            autoloader: self.autoloader.clone(),
+            features,
+            router,
+        }
+    }
+
+    pub fn apply_session(&mut self, schema: &str, table: &str) -> App<ConnectionPool, Features>{
+        let router: Router = mem::replace(&mut self.router, Router::new());
+        let features: Vec<Box<dyn Feature>> = mem::replace(&mut self.features, Vec::new());
+
+        let session_store: BlandworkSessionStore = BlandworkSessionStore::new(
+            &self.pool,
+            schema.to_string(),
+            table.to_string()
+        );
+
+        // Generate a cryptographic key to sign the session cookie.
+        let key: Key = Key::generate();
+        
+        // common session layer, provides Session extract
+        let session_layer: SessionManagerLayer<BlandworkSessionStore, tower_sessions::service::SignedCookie> = SessionManagerLayer::new(session_store)
+            .with_secure(false)
+            // .with_expiry(Expiry::OnSessionEnd)
+            .with_expiry(Expiry::OnInactivity(time::Duration::days(1)))
+            .with_signed(key);
+
+        let vault: Vault = Vault::new(self.pool.clone());
+
+        let auth_layer = AuthManagerLayerBuilder::new(vault, session_layer.clone()).build();
+
+        App {
+            config: self.config.clone(),
+            pool: self.pool.clone(),
+            sessions: Some(Sessions{
+                common: session_layer,
+                protected: auth_layer
+            }),
+            autoloader: self.autoloader.clone(),
+            features,
+            router,
+        }
+    }
+
+    pub async fn run(&mut self) {
+        let listener: TcpListener = TcpListener::bind(format!("{host}:{port}", host=self.config.server.host, port=self.config.server.port))
+            .await
+            .unwrap();
+        
+        // tracing_subscriber::fmt::fmt().with_env_filter(EnvFilter::from_default_env()).init();
+        let stdout = tracing_subscriber::fmt::layer().pretty();
+        let subscriber = Registry::default().with(stdout);
+    
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("Unable to set global subscriber");
+        
+        axum::serve(listener, self.router.clone()).await.unwrap();
+    }
 }

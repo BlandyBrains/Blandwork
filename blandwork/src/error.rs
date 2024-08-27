@@ -2,6 +2,7 @@ use std::fmt;
 use axum::response::{IntoResponse, Response};
 use hyper::StatusCode;
 use thiserror::Error;
+use tokio::task;
 
 
 #[derive(Debug)]
@@ -46,7 +47,16 @@ pub enum BlandworkError {
     Database(#[from] tokio_postgres::Error),
 
     #[error("{0}")]
-    Connection(#[from] bb8::RunError<tokio_postgres::Error>)
+    Connection(#[from] bb8::RunError<tokio_postgres::Error>),
+
+    #[error("{0}")]
+    AuthenticationFailure(String),
+
+    #[error("{0}")]
+    Generic(String),
+
+    #[error("{0}")]
+    JoinError(#[from] task::JoinError)
 }
 
 impl IntoResponse for BlandworkError {
